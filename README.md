@@ -12,6 +12,9 @@ brew install kernelp4nic/tap/aws-tui
 aws-tui
 ```
 
+If you have the unrelated `aws-tui` cask installed, remove it first with
+`brew uninstall --cask aws-tui` to avoid a binary name conflict.
+
 Homebrew builds the Rust binary from the versioned source release and installs
 AWS CLI v2 as a dependency. The first build may take a few minutes.
 
