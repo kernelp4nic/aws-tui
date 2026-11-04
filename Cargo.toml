@@ -1,0 +1,19 @@
+[package]
+name = "aws-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Keyboard-driven AWS explorer backed by AWS CLI"
+repository = "https://github.com/kernelp4nic/aws-tui"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "crossterm_0_29"] }
+crossterm = "0.29"
+serde_json = "1"
+portable-pty = "0.9"
+tui-term = "0.3.4"
+
+[profile.release]
+lto = "thin"
+strip = true
