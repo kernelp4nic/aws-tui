@@ -72,6 +72,13 @@ impl<B: Backend> Backend for TextRuns<'_, B> {
 /// Always release mouse capture on normal return, errors, or unwinding.
 pub struct MouseCapture;
 impl MouseCapture {
+    pub fn set_enabled(enabled: bool) -> std::io::Result<()> {
+        if enabled {
+            crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
+        } else {
+            crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)
+        }
+    }
     pub fn enable() -> std::io::Result<Self> {
         crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)?;
         Ok(Self)

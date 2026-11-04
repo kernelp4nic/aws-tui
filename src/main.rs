@@ -35,6 +35,7 @@ enum Action {
     Details,
     DetailsFormat,
     Columns,
+    MouseMode,
     ReadOnly,
     EnableActions,
     Session(usize, String),
@@ -52,6 +53,7 @@ impl Action {
             Self::Session(_, target) => format!("Resume SSM {target}"),
             Self::Service(s) => format!("Browse {}", s.name()),
             Self::Refresh => "Refresh resources".into(),
+            Self::MouseMode => "Toggle text selection / mouse navigation (F2)".into(),
             Self::Columns => "Choose visible columns".into(),
             Self::Details => "Toggle details panel".into(),
             Self::DetailsFormat => "Toggle details table / raw JSON".into(),
@@ -119,6 +121,7 @@ struct MouseLayout {
 }
 struct App {
     mouse: MouseLayout,
+    mouse_enabled: bool,
     client: Client,
     service: Service,
     resources: Vec<Resource>,
@@ -149,6 +152,7 @@ impl App {
         Self {
             client,
             mouse: MouseLayout::default(),
+            mouse_enabled: true,
             service: Service::Instances,
             resources: vec![],
             selected: 0,
@@ -240,6 +244,7 @@ impl App {
             Action::Details,
             Action::DetailsFormat,
             Action::Columns,
+            Action::MouseMode,
         ]);
         all.push(if self.client.read_only {
             Action::EnableActions
@@ -373,6 +378,10 @@ impl App {
                 }
             }
             Action::Refresh => self.refresh(),
+            Action::MouseMode => {
+                self.mouse_enabled = !self.mouse_enabled;
+                self.session_prefix = false;
+            }
             Action::Columns => self.overlay = Some(Overlay::Columns { selected: 0 }),
             Action::Details => self.details = !self.details,
             Action::DetailsFormat => {
@@ -417,6 +426,9 @@ impl App {
         }
     }
     fn mouse(&mut self, event: MouseEvent) {
+        if !self.mouse_enabled {
+            return;
+        }
         let position = (event.column, event.row).into();
         let delta = match event.kind {
             MouseEventKind::ScrollUp => -3isize,
@@ -499,6 +511,13 @@ impl App {
     }
     fn key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
+            return;
+        }
+        if key.code == KeyCode::F(2) {
+            self.execute(Action::MouseMode);
+            return;
+        }
+        if !self.mouse_enabled {
             return;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -875,7 +894,7 @@ fn draw(f: &mut Frame, a: &mut App) {
                 .block(panel(" Terminal ").style(base)),
             areas[1],
         );
-        f.render_widget(Paragraph::new(if a.session_prefix { " Ctrl+G: h instances · n next session · x close tab · Ctrl+G send literal" } else { " Ctrl+G h instances · Ctrl+G n next · Ctrl+G x close · Shift+PgUp/PgDn scroll · exit closes tab" }), areas[2]);
+        f.render_widget(Paragraph::new(if a.session_prefix { " Ctrl+G: h instances · n next session · x close tab · Ctrl+G send literal" } else { " F2 select text · Ctrl+G h instances · Ctrl+G n next · Ctrl+G x close · Shift+PgUp/PgDn scroll · exit closes tab" }), areas[2]);
         return;
     }
 
@@ -1102,7 +1121,7 @@ fn draw(f: &mut Frame, a: &mut App) {
         .block(panel(" Status ")),
         outer[2],
     );
-    f.render_widget(Paragraph::new(" / filter  s state  c columns  Tab service  Enter actions  J JSON  r refresh  R region  S SSM  Ctrl+P commands  ? help  q quit").style(Style::default().fg(Color::DarkGray)),outer[3]);
+    f.render_widget(Paragraph::new(" / filter  s state  c columns  Tab service  Enter actions  J JSON  r refresh  R region  S SSM  F2 select text  Ctrl+P commands  ? help  q quit").style(Style::default().fg(Color::DarkGray)),outer[3]);
     if let Some(o) = &a.overlay {
         a.mouse.hits.clear();
         match o {
@@ -1296,6 +1315,7 @@ fn run<B: ratatui::backend::Backend<Error = std::io::Error>>(
     });
     app.refresh();
     let mut drawn_session = None;
+    let mut captured_mouse = true;
     while !app.quit {
         while let Ok(reply) = app.rx.try_recv() {
             match reply {
@@ -1384,17 +1404,35 @@ fn run<B: ratatui::backend::Backend<Error = std::io::Error>>(
                 }
             }
         }
-        app.poll_sessions();
+        if app.mouse_enabled {
+            app.poll_sessions();
+        }
         if let Some(index) = app.active_session {
             let size = terminal.size()?;
             let (rows, cols) = session_size(Rect::new(0, 0, size.width, size.height));
             app.sessions[index].pty.resize(rows, cols);
         }
-        if drawn_session != app.active_session {
+        let mouse_mode_changed = captured_mouse != app.mouse_enabled;
+        if mouse_mode_changed {
+            terminal::MouseCapture::set_enabled(app.mouse_enabled)?;
+            captured_mouse = app.mouse_enabled;
+        }
+        if app.mouse_enabled && drawn_session != app.active_session {
             terminal.clear()?;
             drawn_session = app.active_session;
         }
-        terminal.draw(|f| draw(f, &mut app))?;
+        if app.mouse_enabled || mouse_mode_changed {
+            terminal.draw(|f| {
+                draw(f, &mut app);
+                if !app.mouse_enabled {
+                    let area = f.area();
+                    if area.height > 0 {
+                        f.render_widget(Paragraph::new(" TEXT SELECTION · drag to select, Cmd+C to copy · F2 returns to TUI ")
+                            .style(Style::default().fg(Color::Black).bg(Color::Yellow)),Rect::new(area.x,area.bottom()-1,area.width,1));
+                    }
+                }
+            })?;
+        }
         if event::poll(Duration::from_millis(80))? {
             match event::read()? {
                 Event::Key(key) => app.key(key),
@@ -1419,6 +1457,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn text_selection_suspends_tui_input_and_mouse_until_f2() {
+        let mut app = App::new(Client {
+            profile: "default".into(),
+            region: None,
+            read_only: true,
+        });
+        app.key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert!(!app.mouse_enabled);
+        app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        app.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!app.quit, "Copy keys must not quit while selecting text");
+        app.key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert!(app.mouse_enabled);
+    }
     #[test]
     fn enter_opens_context_menu_without_hiding_details_and_pins_target() {
         let mut app = App::new(Client {

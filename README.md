@@ -166,3 +166,13 @@ External SSM currently opens macOS Terminal.app and uses the active profile and
 region. macOS may request permission to control Terminal. That session lives
 outside the TUI: use `exit` in its window to end it; quitting the TUI or changing
 its mode does not close external sessions.
+
+### Select and copy text
+
+Press **F2** to switch to native terminal text selection. Drag over the text and
+use your terminal's copy shortcut (Cmd+C on macOS), then press **F2** again to
+return to mouse navigation. A yellow footer indicates selection mode. The screen
+stays still and keys are not forwarded to SSM while selecting; remote processes
+continue running. This also works from the command palette as **Toggle text
+selection / mouse navigation**. Some terminals additionally allow Shift+drag to
+bypass mouse capture without switching modes.
