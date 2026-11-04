@@ -112,6 +112,7 @@ impl Client {
                         | "describe-subnets"
                         | "describe-security-groups"
                         | "describe-regions"
+                        | "get-console-output"
                 )
                 | ("s3api", "list-buckets")
         );

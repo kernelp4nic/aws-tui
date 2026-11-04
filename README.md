@@ -83,7 +83,7 @@ still appropriate if you need account-enforced permissions.
 | g/G | First / last |
 | Tab / Shift+Tab | Next / previous service |
 | s | Cycle instance state filter |
-| Enter | Toggle details panel |
+| Enter | Open instance actions menu |
 | Shift+J | Switch details table / raw JSON |
 | PgUp / PgDn | Scroll details |
 | r | Refresh |
@@ -147,3 +147,22 @@ column. The wheel moves through the resource list, detail fields or the open
 menu under the pointer. In SSM, the wheel scrolls local terminal history;
 click the **Instances** label or another session tab to switch views.
 Remote application mouse reporting and drag selection are not implemented.
+
+## Instance actions menu
+
+Details remain visible by default while selecting resources, including in narrow
+terminals. Press **Enter** on an EC2 instance for a contextual menu with embedded
+SSM, SSM in an external Terminal window, EC2 console logs, details visibility,
+raw JSON, refresh, and EC2 start/stop/reboot actions. The same menu supports mouse
+clicks and wheel navigation. Actions remain tied to the selected instance ID
+if resources refresh while the menu is open.
+
+SSM and instance mutations require actions mode. Console output is read-only and
+comes from `ec2 get-console-output`; it is a boot/serial console snapshot, not
+application logs or a live CloudWatch stream. Scroll with PgUp/PgDn and close
+with Esc. Access still depends on the caller's IAM permissions.
+
+External SSM currently opens macOS Terminal.app and uses the active profile and
+region. macOS may request permission to control Terminal. That session lives
+outside the TUI: use `exit` in its window to end it; quitting the TUI or changing
+its mode does not close external sessions.

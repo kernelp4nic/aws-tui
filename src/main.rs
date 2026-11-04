@@ -25,6 +25,8 @@ enum Reply {
     Loaded(Result<Vec<Resource>, String>),
     Identity(Result<serde_json::Value, String>),
     Action(Result<serde_json::Value, String>),
+    Console(String, Result<serde_json::Value, String>),
+    External(String, Result<(), String>),
 }
 #[derive(Clone)]
 enum Action {
@@ -40,6 +42,8 @@ enum Action {
     Stop,
     Reboot,
     ConnectSsm,
+    ExternalSsm,
+    ConsoleLogs,
     Quit,
 }
 impl Action {
@@ -55,6 +59,8 @@ impl Action {
             Self::EnableActions => "Enable actions and SSM".into(),
             Self::Start => "Start selected instance".into(),
             Self::Stop => "Stop selected instance".into(),
+            Self::ExternalSsm => "SSM in external Terminal".into(),
+            Self::ConsoleLogs => "View EC2 console logs".into(),
             Self::ConnectSsm => "Connect via SSM".into(),
             Self::Reboot => "Reboot selected instance".into(),
             Self::Quit => "Quit".into(),
@@ -62,6 +68,16 @@ impl Action {
     }
 }
 enum Overlay {
+    InstanceMenu {
+        target: String,
+        name: String,
+        selected: usize,
+    },
+    Console {
+        target: String,
+        text: String,
+        scroll: u16,
+    },
     Palette {
         query: String,
         selected: usize,
@@ -87,6 +103,7 @@ enum Click {
     Service(Service),
     Resource(usize),
     Command(Action),
+    InstanceCommand(String, Action),
     Column(usize),
     Palette,
     Explorer,
@@ -235,7 +252,11 @@ impl App {
                 Action::Stop,
                 Action::Reboot,
                 Action::ConnectSsm,
+                Action::ExternalSsm,
             ]);
+        }
+        if self.service == Service::Instances {
+            all.push(Action::ConsoleLogs);
         }
         all.extend(
             self.sessions
@@ -247,6 +268,48 @@ impl App {
         all.into_iter()
             .filter(|a| fuzzy(query.trim_start_matches('>').trim(), &a.label()))
             .collect()
+    }
+    fn instance_commands(&self) -> Vec<Action> {
+        let mut commands = vec![
+            Action::ConnectSsm,
+            Action::ExternalSsm,
+            Action::ConsoleLogs,
+            Action::Details,
+            Action::DetailsFormat,
+            Action::Refresh,
+        ];
+        if self.client.read_only {
+            commands.push(Action::EnableActions);
+        } else {
+            commands.extend([Action::Start, Action::Stop, Action::Reboot]);
+        }
+        commands
+    }
+    fn open_instance_menu(&mut self) {
+        if self.service == Service::Instances {
+            if let Some(resource) = self.current() {
+                self.overlay = Some(Overlay::InstanceMenu {
+                    target: resource.id.clone(),
+                    name: resource.name.clone(),
+                    selected: 0,
+                });
+            }
+        }
+    }
+    fn execute_for_instance(&mut self, target: &str, action: Action) {
+        if self.service != Service::Instances {
+            return;
+        }
+        if let Some(index) = self
+            .visible()
+            .iter()
+            .position(|&i| self.resources[i].id == target)
+        {
+            self.selected = index;
+            self.execute(action);
+        } else {
+            self.notice = "Instance is no longer in the current results; reopen the menu".into();
+        }
     }
     fn execute(&mut self, action: Action) {
         match action {
@@ -263,18 +326,50 @@ impl App {
                     self.refresh();
                 }
             }
-            Action::ConnectSsm => {
+            Action::ConnectSsm | Action::ExternalSsm => {
                 if self.client.read_only {
                     self.notice =
                         "Read-only mode: open Ctrl+P and choose Enable actions and SSM".into();
                 } else if !self.loading && self.service == Service::Instances {
                     if let Some(resource) = self.current() {
                         if resource.state == "running" {
-                            self.pending_session = Some(resource.id.clone());
+                            if matches!(action, Action::ExternalSsm) {
+                                let target = resource.id.clone();
+                                let client = self.client.clone();
+                                let tx = self.tx.clone();
+                                self.loading = true;
+                                self.notice = format!("Opening external Terminal for {target}…");
+                                thread::spawn(move || {
+                                    let result = external_ssm(&client, &target);
+                                    let _ = tx.send(Reply::External(target, result));
+                                });
+                            } else {
+                                self.pending_session = Some(resource.id.clone());
+                            }
                         } else {
                             self.notice = "SSM requires a running instance".into();
                         }
                     }
+                }
+            }
+            Action::ConsoleLogs => {
+                if self.service != Service::Instances || self.loading {
+                    return;
+                }
+                if let Some(resource) = self.current() {
+                    let target = resource.id.clone();
+                    self.overlay = Some(Overlay::Console {
+                        target: target.clone(),
+                        text: "Loading EC2 console output…".into(),
+                        scroll: 0,
+                    });
+                    let client = self.client.clone();
+                    let tx = self.tx.clone();
+                    thread::spawn(move || {
+                        let result =
+                            client.run("ec2", "get-console-output", &["--instance-id", &target]);
+                        let _ = tx.send(Reply::Console(target, result));
+                    });
                 }
             }
             Action::Refresh => self.refresh(),
@@ -371,6 +466,10 @@ impl App {
                 self.selected = index;
                 self.scroll = 0;
             }
+            Some(Click::InstanceCommand(target, action)) => {
+                self.overlay = None;
+                self.execute_for_instance(&target, action);
+            }
             Some(Click::Command(action)) => {
                 self.overlay = None;
                 self.execute(action);
@@ -446,6 +545,29 @@ impl App {
                 return;
             }
             match &mut overlay {
+                Overlay::InstanceMenu {
+                    target, selected, ..
+                } => match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => *selected = selected.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        *selected =
+                            (*selected + 1).min(self.instance_commands().len().saturating_sub(1))
+                    }
+                    KeyCode::Enter => {
+                        if let Some(action) = self.instance_commands().get(*selected).cloned() {
+                            self.execute_for_instance(target, action);
+                        }
+                        return;
+                    }
+                    _ => {}
+                },
+                Overlay::Console { scroll, .. } => match key.code {
+                    KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
+                    KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                    KeyCode::PageDown => *scroll = scroll.saturating_add(10),
+                    KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                    _ => {}
+                },
                 Overlay::Palette { query, selected } => match key.code {
                     KeyCode::Char(c) if !ctrl => {
                         query.push(c);
@@ -605,7 +727,7 @@ impl App {
                 self.state_filter = (self.state_filter + 1) % 3;
                 self.selected = 0;
             }
-            KeyCode::Enter => self.details = !self.details,
+            KeyCode::Enter => self.open_instance_menu(),
             KeyCode::Char('J') => self.execute(Action::DetailsFormat),
             KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
             KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
@@ -634,6 +756,40 @@ fn popup(f: &mut Frame, width: u16, height: u16) -> Rect {
     let r = Rect::new((a.width - w) / 2, (a.height - h) / 2, w, h);
     f.render_widget(Clear, r);
     r
+}
+fn external_ssm(client: &Client, target: &str) -> Result<(), String> {
+    let command = client.session_command(target)?;
+    if !cfg!(target_os = "macos") {
+        return Err(
+            "External Terminal is currently supported on macOS only; use embedded SSM".into(),
+        );
+    }
+    let script = terminal_script(&command);
+    let output = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|error| format!("Cannot open Terminal: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Cannot open Terminal: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+fn terminal_script(command: &std::process::Command) -> String {
+    let quote =
+        |arg: &std::ffi::OsStr| format!("'{}'", arg.to_string_lossy().replace('\'', "'\"'\"'"));
+    let line = std::iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let line = format!("AWS_PAGER='' AWS_CLI_AUTO_PROMPT=off {line}")
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    format!("tell application \"Terminal\"\nactivate\ndo script \"{line}\"\nend tell")
 }
 fn session_layout(area: Rect) -> std::rc::Rc<[Rect]> {
     Layout::vertical([
@@ -785,7 +941,7 @@ fn draw(f: &mut Frame, a: &mut App) {
             ));
         }
     }
-    let body = if a.details && cols[1].width >= 65 {
+    let body = if a.details {
         Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
             .split(cols[1])
             .to_vec()
@@ -946,10 +1102,72 @@ fn draw(f: &mut Frame, a: &mut App) {
         .block(panel(" Status ")),
         outer[2],
     );
-    f.render_widget(Paragraph::new(" / filter  s state  c columns  Tab service  Enter details  J JSON  r refresh  R region  S SSM  Ctrl+P commands  ? help  q quit").style(Style::default().fg(Color::DarkGray)),outer[3]);
+    f.render_widget(Paragraph::new(" / filter  s state  c columns  Tab service  Enter actions  J JSON  r refresh  R region  S SSM  Ctrl+P commands  ? help  q quit").style(Style::default().fg(Color::DarkGray)),outer[3]);
     if let Some(o) = &a.overlay {
         a.mouse.hits.clear();
         match o {
+            Overlay::InstanceMenu {
+                target,
+                name,
+                selected,
+            } => {
+                let commands = a.instance_commands();
+                let r = popup(f, 76, commands.len() as u16 + 4);
+                let items: Vec<_> = commands
+                    .iter()
+                    .map(|action| {
+                        let label = action.label();
+                        if a.client.read_only
+                            && matches!(action, Action::ConnectSsm | Action::ExternalSsm)
+                        {
+                            format!("{label}  [requires actions enabled]")
+                        } else {
+                            label
+                        }
+                    })
+                    .collect();
+                let mut state = ListState::default().with_selected(Some(*selected));
+                f.render_stateful_widget(
+                    List::new(items)
+                        .block(panel(format!(" {name} · {target} · Esc close ")))
+                        .highlight_symbol("› ")
+                        .highlight_style(
+                            Style::default().fg(Color::Cyan).bg(Color::Rgb(35, 44, 56)),
+                        ),
+                    r,
+                    &mut state,
+                );
+                a.mouse.menu = r;
+                for row in 0..r.height.saturating_sub(2) as usize {
+                    if let Some(action) = commands.get(state.offset() + row) {
+                        a.mouse.hits.push((
+                            Rect::new(r.x + 1, r.y + 1 + row as u16, r.width.saturating_sub(2), 1),
+                            Click::InstanceCommand(target.clone(), action.clone()),
+                        ));
+                    }
+                }
+            }
+            Overlay::Console {
+                target,
+                text,
+                scroll,
+            } => {
+                let r = popup(
+                    f,
+                    f.area().width.saturating_sub(4),
+                    f.area().height.saturating_sub(4),
+                );
+                a.mouse.menu = r;
+                f.render_widget(
+                    Paragraph::new(text.as_str())
+                        .scroll((*scroll, 0))
+                        .wrap(Wrap { trim: false })
+                        .block(panel(format!(
+                            " EC2 console logs · {target} · PgUp/PgDn · Esc close "
+                        ))),
+                    r,
+                );
+            }
             Overlay::Palette { query, selected } => {
                 let commands = a.commands(query);
                 let r = popup(f, 72, 18);
@@ -1035,7 +1253,7 @@ fn draw(f: &mut Frame, a: &mut App) {
             }
             Overlay::Help => {
                 let r = popup(f, 76, 16);
-                f.render_widget(Paragraph::new("j/k or arrows  Move selection\ng/G           First / last resource\n/             Filter by name, ID, IP, tags, or any JSON value\ns             Cycle EC2 state: all / running / stopped\nTab/Shift+Tab Change service\nEnter         Toggle details panel\nJ             Switch details table / raw JSON\nPgUp/PgDn     Scroll details\nc             Choose visible columns\nS             Connect via SSM (requires actions enabled)\nr / R         Refresh / change region\nCtrl+P/Ctrl+K Command palette (also :)\nEsc           Clear filters / dismiss overlay\nq / Ctrl+C    Quit\n\nChange read-only / actions mode from the command palette.\nActions require typing the exact instance ID.").block(panel(" Keyboard shortcuts · any key closes ")),r);
+                f.render_widget(Paragraph::new("j/k or arrows  Move selection\ng/G           First / last resource\n/             Filter by name, ID, IP, tags, or any JSON value\ns             Cycle EC2 state: all / running / stopped\nTab/Shift+Tab Change service\nEnter         Instance actions menu\nJ             Switch details table / raw JSON\nPgUp/PgDn     Scroll details\nc             Choose visible columns\nS             Connect via SSM (requires actions enabled)\nr / R         Refresh / change region\nCtrl+P/Ctrl+K Command palette (also :)\nEsc           Clear filters / dismiss overlay\nq / Ctrl+C    Quit\n\nChange read-only / actions mode from the command palette.\nActions require typing the exact instance ID.").block(panel(" Keyboard shortcuts · any key closes ")),r);
             }
         }
     }
@@ -1081,6 +1299,32 @@ fn run<B: ratatui::backend::Backend<Error = std::io::Error>>(
     while !app.quit {
         while let Ok(reply) = app.rx.try_recv() {
             match reply {
+                Reply::External(target, result) => {
+                    app.loading = false;
+                    app.notice = match result {
+                        Ok(()) => format!("Opened SSM for {target} in external Terminal"),
+                        Err(error) => error,
+                    };
+                }
+                Reply::Console(target, result) => {
+                    if let Some(Overlay::Console {
+                        target: current,
+                        text,
+                        ..
+                    }) = &mut app.overlay
+                    {
+                        if *current == target {
+                            *text = match result {
+                                Ok(value) => value["Output"]
+                                    .as_str()
+                                    .filter(|text| !text.is_empty())
+                                    .unwrap_or("No EC2 console output available for this instance.")
+                                    .to_string(),
+                                Err(error) => format!("Cannot load EC2 console output: {error}"),
+                            };
+                        }
+                    }
+                }
                 Reply::Loaded(result) => {
                     app.loading = false;
                     match result {
@@ -1175,6 +1419,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn enter_opens_context_menu_without_hiding_details_and_pins_target() {
+        let mut app = App::new(Client {
+            profile: "default".into(),
+            region: None,
+            read_only: true,
+        });
+        for id in ["i-first", "i-second"] {
+            app.resources.push(Resource {
+                id: id.into(),
+                name: id.into(),
+                state: "running".into(),
+                kind: "t3.micro".into(),
+                address: "—".into(),
+                raw: serde_json::json!({}),
+            });
+        }
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.details);
+        assert!(
+            matches!(&app.overlay,Some(Overlay::InstanceMenu { target,.. }) if target == "i-first")
+        );
+        app.selected = 1;
+        app.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.selected, 0,
+            "Context action must target the original instance"
+        );
+        assert!(app.pending_session.is_none(), "Read-only blocks SSM");
+        assert!(app.notice.contains("Read-only"));
+        app.execute_for_instance("i-missing", Action::Stop);
+        assert!(app.notice.contains("no longer"));
+    }
+    #[test]
+    fn external_terminal_command_quotes_shell_and_applescript_arguments() {
+        let client = Client {
+            profile: "work'\"$name".into(),
+            region: Some("us-east-1".into()),
+            read_only: false,
+        };
+        let command = client.session_command("i-123abc").unwrap();
+        let script = terminal_script(&command);
+        assert!(script.starts_with("tell application \"Terminal\"\n"));
+        assert!(script.contains("'ssm' 'start-session' '--target' 'i-123abc'"));
+        assert!(script.contains("'work'\\\"'\\\"'\\\"$name'"));
+    }
     #[test]
     fn shell_layout_preserves_first_output_line_and_matches_pty_dimensions() {
         use ratatui::{backend::TestBackend, Terminal};
