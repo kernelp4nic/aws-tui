@@ -66,7 +66,8 @@ still appropriate if you need account-enforced permissions.
 - All EC2 reservation pages through AWS CLI automatic pagination.
 - Local filtering across names, IDs, addresses, tags and JSON values; multiple
   search words must all match. EC2 state filter: all, running, stopped.
-- Raw JSON details with tags and scroll support.
+- Readable detail tables grouped into overview, network, storage and tags.
+- Raw JSON remains available with Shift+J; PgUp/PgDn scrolls either view.
 - Asynchronous AWS requests, loading status, actionable CLI errors.
 - STS identity in the header, explicit profile option and region switching.
 - Fuzzy command palette inspired by Lambda TUI's picker, with list navigation
@@ -82,7 +83,8 @@ still appropriate if you need account-enforced permissions.
 | g/G | First / last |
 | Tab / Shift+Tab | Next / previous service |
 | s | Cycle instance state filter |
-| Enter | Toggle JSON details |
+| Enter | Toggle details panel |
+| Shift+J | Switch details table / raw JSON |
 | PgUp / PgDn | Scroll details |
 | r | Refresh |
 | R | Enter a region |
@@ -135,3 +137,13 @@ session processes; AWS session lifecycle and idle limits still apply remotely.
 Requires the local `session-manager-plugin`, a running SSM-managed instance with
 SSM Agent and appropriate instance permissions/connectivity, and caller IAM
 permissions for Session Manager. AWS CLI reports connection and permission errors.
+
+## Mouse
+
+Mouse capture is enabled while the TUI is running and released on exit.
+Click a service or resource row to select it. Click **Commands** or **Columns**
+in the header to open menus; click menu entries to activate them or toggle a
+column. The wheel moves through the resource list, detail fields or the open
+menu under the pointer. In SSM, the wheel scrolls local terminal history;
+click the **Instances** label or another session tab to switch views.
+Remote application mouse reporting and drag selection are not implemented.
