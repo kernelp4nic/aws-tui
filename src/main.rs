@@ -3,10 +3,7 @@ mod details;
 mod pty;
 mod terminal;
 use aws::{Client, Resource, Service};
-use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
@@ -35,7 +32,6 @@ enum Action {
     Details,
     DetailsFormat,
     Columns,
-    MouseMode,
     ReadOnly,
     EnableActions,
     Session(usize, String),
@@ -53,7 +49,6 @@ impl Action {
             Self::Session(_, target) => format!("Resume SSM {target}"),
             Self::Service(s) => format!("Browse {}", s.name()),
             Self::Refresh => "Refresh resources".into(),
-            Self::MouseMode => "Toggle text selection / mouse navigation (F2)".into(),
             Self::Columns => "Choose visible columns".into(),
             Self::Details => "Toggle details panel".into(),
             Self::DetailsFormat => "Toggle details table / raw JSON".into(),
@@ -100,28 +95,7 @@ struct Session {
     pty: pty::PtySession,
 }
 
-#[derive(Clone)]
-enum Click {
-    Service(Service),
-    Resource(usize),
-    Command(Action),
-    InstanceCommand(String, Action),
-    Column(usize),
-    Palette,
-    Explorer,
-    Session(usize),
-}
-#[derive(Default)]
-struct MouseLayout {
-    hits: Vec<(Rect, Click)>,
-    resources: Rect,
-    details: Rect,
-    terminal: Rect,
-    menu: Rect,
-}
 struct App {
-    mouse: MouseLayout,
-    mouse_enabled: bool,
     client: Client,
     service: Service,
     resources: Vec<Resource>,
@@ -151,8 +125,6 @@ impl App {
         let (tx, rx) = mpsc::channel();
         Self {
             client,
-            mouse: MouseLayout::default(),
-            mouse_enabled: true,
             service: Service::Instances,
             resources: vec![],
             selected: 0,
@@ -244,7 +216,6 @@ impl App {
             Action::Details,
             Action::DetailsFormat,
             Action::Columns,
-            Action::MouseMode,
         ]);
         all.push(if self.client.read_only {
             Action::EnableActions
@@ -378,10 +349,7 @@ impl App {
                 }
             }
             Action::Refresh => self.refresh(),
-            Action::MouseMode => {
-                self.mouse_enabled = !self.mouse_enabled;
-                self.session_prefix = false;
-            }
+
             Action::Columns => self.overlay = Some(Overlay::Columns { selected: 0 }),
             Action::Details => self.details = !self.details,
             Action::DetailsFormat => {
@@ -425,101 +393,11 @@ impl App {
             }
         }
     }
-    fn mouse(&mut self, event: MouseEvent) {
-        if !self.mouse_enabled {
-            return;
-        }
-        let position = (event.column, event.row).into();
-        let delta = match event.kind {
-            MouseEventKind::ScrollUp => -3isize,
-            MouseEventKind::ScrollDown => 3,
-            _ => 0,
-        };
-        if delta != 0 {
-            if self.overlay.is_some() {
-                if self.mouse.menu.contains(position) {
-                    let code = if delta < 0 {
-                        KeyCode::Up
-                    } else {
-                        KeyCode::Down
-                    };
-                    for _ in 0..3 {
-                        self.key(KeyEvent::new(code, KeyModifiers::NONE));
-                    }
-                }
-            } else if let Some(index) = self.active_session {
-                if self.mouse.terminal.contains(position) {
-                    self.sessions[index].pty.scroll(-delta);
-                }
-            } else if self.mouse.details.contains(position) {
-                self.scroll = self.scroll.saturating_add_signed(delta as i16);
-            } else if self.mouse.resources.contains(position) {
-                self.selected = self
-                    .selected
-                    .saturating_add_signed(delta)
-                    .min(self.visible().len().saturating_sub(1));
-                self.scroll = 0;
-            }
-            return;
-        }
-        if event.kind != MouseEventKind::Down(MouseButton::Left) {
-            return;
-        }
-        let target = self
-            .mouse
-            .hits
-            .iter()
-            .rev()
-            .find(|(area, _)| area.contains(position))
-            .map(|(_, target)| target.clone());
-        match target {
-            Some(Click::Service(service)) => self.execute(Action::Service(service)),
-            Some(Click::Resource(index)) => {
-                self.selected = index;
-                self.scroll = 0;
-            }
-            Some(Click::InstanceCommand(target, action)) => {
-                self.overlay = None;
-                self.execute_for_instance(&target, action);
-            }
-            Some(Click::Command(action)) => {
-                self.overlay = None;
-                self.execute(action);
-            }
-            Some(Click::Column(index)) => {
-                if let Some(Overlay::Columns { selected }) = &mut self.overlay {
-                    *selected = index;
-                }
-                self.key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
-            }
-            Some(Click::Palette) => {
-                self.overlay = Some(Overlay::Palette {
-                    query: String::new(),
-                    selected: 0,
-                })
-            }
-            Some(Click::Explorer) => {
-                self.active_session = None;
-                self.session_prefix = false;
-            }
-            Some(Click::Session(index)) => {
-                self.active_session = Some(index);
-                self.session_prefix = false;
-            }
-            None => {}
-        }
-    }
     fn key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
             return;
         }
-        if key.code == KeyCode::F(2) {
-            self.execute(Action::MouseMode);
-            return;
-        }
-        if !self.mouse_enabled {
-            return;
-        }
+
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if let Some(index) = self.active_session {
             if self.session_prefix {
@@ -824,7 +702,6 @@ fn session_size(area: Rect) -> (u16, u16) {
     (content.height.max(1), content.width.max(1))
 }
 fn draw(f: &mut Frame, a: &mut App) {
-    a.mouse = MouseLayout::default();
     let base = Style::default()
         .bg(Color::Rgb(20, 23, 29))
         .fg(Color::Rgb(218, 224, 232));
@@ -832,28 +709,6 @@ fn draw(f: &mut Frame, a: &mut App) {
     if let Some(index) = a.active_session {
         let session = &a.sessions[index];
         let areas = session_layout(f.area());
-        let mut tab_x = areas[0].x + 13;
-        a.mouse.hits.push((
-            Rect::new(areas[0].x, areas[0].y, 12.min(areas[0].width), 1),
-            Click::Explorer,
-        ));
-        for (i, session) in a.sessions.iter().enumerate() {
-            let label = format!(
-                "{} {}: {}",
-                if i == index { "›" } else { " " },
-                i + 1,
-                session.target
-            );
-            let width = ratatui::text::Line::from(label).width() as u16;
-            if tab_x < areas[0].right() {
-                a.mouse.hits.push((
-                    Rect::new(tab_x, areas[0].y, width.min(areas[0].right() - tab_x), 1),
-                    Click::Session(i),
-                ));
-            }
-            tab_x = tab_x.saturating_add(width + 3);
-        }
-        a.mouse.terminal = areas[1];
         let tabs = a
             .sessions
             .iter()
@@ -894,7 +749,7 @@ fn draw(f: &mut Frame, a: &mut App) {
                 .block(panel(" Terminal ").style(base)),
             areas[1],
         );
-        f.render_widget(Paragraph::new(if a.session_prefix { " Ctrl+G: h instances · n next session · x close tab · Ctrl+G send literal" } else { " F2 select text · Ctrl+G h instances · Ctrl+G n next · Ctrl+G x close · Shift+PgUp/PgDn scroll · exit closes tab" }), areas[2]);
+        f.render_widget(Paragraph::new(if a.session_prefix { " Ctrl+G: h instances · n next session · x close tab · Ctrl+G send literal" } else { " Ctrl+G h instances · Ctrl+G n next · Ctrl+G x close · Shift+PgUp/PgDn scroll · exit closes tab" }), areas[2]);
         return;
     }
 
@@ -925,19 +780,9 @@ fn draw(f: &mut Frame, a: &mut App) {
     if outer[0].height > 1 {
         let y = outer[0].y + 1;
         f.render_widget(
-            Paragraph::new(" [Commands]  [Columns] ").style(Style::default().fg(Color::Cyan)),
+            Paragraph::new(" Ctrl+P commands · c columns ").style(Style::default().fg(Color::Cyan)),
             Rect::new(outer[0].x, y, outer[0].width, 1),
         );
-        for (x, width, target) in [
-            (1, 10, Click::Palette),
-            (13, 9, Click::Command(Action::Columns)),
-        ] {
-            if outer[0].width > x {
-                a.mouse
-                    .hits
-                    .push((Rect::new(x, y, width.min(outer[0].width - x), 1), target));
-            }
-        }
     }
     let cols = Layout::horizontal([Constraint::Length(21), Constraint::Min(1)]).split(outer[1]);
     let items: Vec<_> = Service::ALL.iter().map(|s| s.name()).collect();
@@ -951,15 +796,7 @@ fn draw(f: &mut Frame, a: &mut App) {
         cols[0],
         &mut state,
     );
-    for (index, service) in Service::ALL.iter().enumerate() {
-        let y = cols[0].y + 1 + index as u16;
-        if y < cols[0].bottom().saturating_sub(1) {
-            a.mouse.hits.push((
-                Rect::new(cols[0].x + 1, y, cols[0].width.saturating_sub(2), 1),
-                Click::Service(*service),
-            ));
-        }
-    }
+
     let body = if a.details {
         Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
             .split(cols[1])
@@ -1028,22 +865,6 @@ fn draw(f: &mut Frame, a: &mut App) {
         body[0],
         &mut a.table,
     );
-    a.mouse.resources = body[0];
-    for row in 0..body[0].height.saturating_sub(3) as usize {
-        let index = a.table.offset() + row;
-        if index >= visible.len() {
-            break;
-        }
-        a.mouse.hits.push((
-            Rect::new(
-                body[0].x + 1,
-                body[0].y + 2 + row as u16,
-                body[0].width.saturating_sub(2),
-                1,
-            ),
-            Click::Resource(index),
-        ));
-    }
     if visible.is_empty() && !a.loading {
         let inner = body[0].inner(ratatui::layout::Margin::new(2, 3));
         f.render_widget(
@@ -1057,7 +878,6 @@ fn draw(f: &mut Frame, a: &mut App) {
         );
     }
     if body.len() > 1 {
-        a.mouse.details = body[1];
         if let Some(resource) = a.current() {
             if a.raw_details {
                 let json = serde_json::to_string_pretty(&resource.raw).unwrap_or_default();
@@ -1121,9 +941,8 @@ fn draw(f: &mut Frame, a: &mut App) {
         .block(panel(" Status ")),
         outer[2],
     );
-    f.render_widget(Paragraph::new(" / filter  s state  c columns  Tab service  Enter actions  J JSON  r refresh  R region  S SSM  F2 select text  Ctrl+P commands  ? help  q quit").style(Style::default().fg(Color::DarkGray)),outer[3]);
+    f.render_widget(Paragraph::new(" / filter  s state  c columns  Tab service  Enter actions  J JSON  r refresh  R region  S SSM  Ctrl+P commands  ? help  q quit").style(Style::default().fg(Color::DarkGray)),outer[3]);
     if let Some(o) = &a.overlay {
-        a.mouse.hits.clear();
         match o {
             Overlay::InstanceMenu {
                 target,
@@ -1156,15 +975,6 @@ fn draw(f: &mut Frame, a: &mut App) {
                     r,
                     &mut state,
                 );
-                a.mouse.menu = r;
-                for row in 0..r.height.saturating_sub(2) as usize {
-                    if let Some(action) = commands.get(state.offset() + row) {
-                        a.mouse.hits.push((
-                            Rect::new(r.x + 1, r.y + 1 + row as u16, r.width.saturating_sub(2), 1),
-                            Click::InstanceCommand(target.clone(), action.clone()),
-                        ));
-                    }
-                }
             }
             Overlay::Console {
                 target,
@@ -1176,7 +986,6 @@ fn draw(f: &mut Frame, a: &mut App) {
                     f.area().width.saturating_sub(4),
                     f.area().height.saturating_sub(4),
                 );
-                a.mouse.menu = r;
                 f.render_widget(
                     Paragraph::new(text.as_str())
                         .scroll((*scroll, 0))
@@ -1208,20 +1017,6 @@ fn draw(f: &mut Frame, a: &mut App) {
                     chunks[1],
                     &mut state,
                 );
-                a.mouse.menu = r;
-                for row in 0..chunks[1].height.saturating_sub(2) as usize {
-                    if let Some(action) = commands.get(state.offset() + row) {
-                        a.mouse.hits.push((
-                            Rect::new(
-                                chunks[1].x + 1,
-                                chunks[1].y + 1 + row as u16,
-                                chunks[1].width.saturating_sub(2),
-                                1,
-                            ),
-                            Click::Command(action.clone()),
-                        ));
-                    }
-                }
             }
             Overlay::Confirm {
                 operation,
@@ -1251,16 +1046,6 @@ fn draw(f: &mut Frame, a: &mut App) {
                     r,
                     &mut state,
                 );
-                a.mouse.menu = r;
-                for row in 0..r.height.saturating_sub(2) as usize {
-                    let index = state.offset() + row;
-                    if index < COLUMN_NAMES.len() {
-                        a.mouse.hits.push((
-                            Rect::new(r.x + 1, r.y + 1 + row as u16, r.width.saturating_sub(2), 1),
-                            Click::Column(index),
-                        ));
-                    }
-                }
             }
             Overlay::Region(input) => {
                 let r = popup(f, 60, 5);
@@ -1307,7 +1092,7 @@ fn run<B: ratatui::backend::Backend<Error = std::io::Error>>(
     terminal: &mut ratatui::Terminal<B>,
     mut app: App,
 ) -> std::io::Result<()> {
-    let _mouse_capture = terminal::MouseCapture::enable()?;
+    crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture)?;
     let c = app.client.clone();
     let tx = app.tx.clone();
     thread::spawn(move || {
@@ -1315,9 +1100,11 @@ fn run<B: ratatui::backend::Backend<Error = std::io::Error>>(
     });
     app.refresh();
     let mut drawn_session = None;
-    let mut captured_mouse = true;
+    let mut redraw = true;
+    let mut last_output = 0;
     while !app.quit {
         while let Ok(reply) = app.rx.try_recv() {
+            redraw = true;
             match reply {
                 Reply::External(target, result) => {
                     app.loading = false;
@@ -1404,39 +1191,55 @@ fn run<B: ratatui::backend::Backend<Error = std::io::Error>>(
                 }
             }
         }
-        if app.mouse_enabled {
-            app.poll_sessions();
+        let session_state: Vec<_> = app
+            .sessions
+            .iter()
+            .map(|session| session.pty.exited)
+            .collect();
+        app.poll_sessions();
+        if session_state
+            != app
+                .sessions
+                .iter()
+                .map(|session| session.pty.exited)
+                .collect::<Vec<_>>()
+        {
+            redraw = true;
         }
         if let Some(index) = app.active_session {
             let size = terminal.size()?;
             let (rows, cols) = session_size(Rect::new(0, 0, size.width, size.height));
             app.sessions[index].pty.resize(rows, cols);
         }
-        let mouse_mode_changed = captured_mouse != app.mouse_enabled;
-        if mouse_mode_changed {
-            terminal::MouseCapture::set_enabled(app.mouse_enabled)?;
-            captured_mouse = app.mouse_enabled;
-        }
-        if app.mouse_enabled && drawn_session != app.active_session {
+        if drawn_session != app.active_session {
             terminal.clear()?;
             drawn_session = app.active_session;
+            redraw = true;
         }
-        if app.mouse_enabled || mouse_mode_changed {
-            terminal.draw(|f| {
-                draw(f, &mut app);
-                if !app.mouse_enabled {
-                    let area = f.area();
-                    if area.height > 0 {
-                        f.render_widget(Paragraph::new(" TEXT SELECTION · drag to select, Cmd+C to copy · F2 returns to TUI ")
-                            .style(Style::default().fg(Color::Black).bg(Color::Yellow)),Rect::new(area.x,area.bottom()-1,area.width,1));
-                    }
-                }
-            })?;
+        let output = app
+            .active_session
+            .map(|index| {
+                app.sessions[index]
+                    .pty
+                    .revision
+                    .load(std::sync::atomic::Ordering::Acquire)
+            })
+            .unwrap_or(0);
+        if output != last_output {
+            last_output = output;
+            redraw = true;
+        }
+        if redraw {
+            terminal.draw(|f| draw(f, &mut app))?;
+            redraw = false;
         }
         if event::poll(Duration::from_millis(80))? {
             match event::read()? {
-                Event::Key(key) => app.key(key),
-                Event::Mouse(mouse) => app.mouse(mouse),
+                Event::Key(key) => {
+                    app.key(key);
+                    redraw = true;
+                }
+                Event::Resize(..) => redraw = true,
                 _ => {}
             }
         }
@@ -1457,21 +1260,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn text_selection_suspends_tui_input_and_mouse_until_f2() {
-        let mut app = App::new(Client {
-            profile: "default".into(),
-            region: None,
-            read_only: true,
-        });
-        app.key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
-        assert!(!app.mouse_enabled);
-        app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        app.key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(!app.quit, "Copy keys must not quit while selecting text");
-        app.key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
-        assert!(app.mouse_enabled);
-    }
+
     #[test]
     fn enter_opens_context_menu_without_hiding_details_and_pins_target() {
         let mut app = App::new(Client {
@@ -1554,75 +1343,7 @@ mod tests {
             assert!(inner.y > session_layout(area)[0].bottom());
         }
     }
-    #[test]
-    fn mouse_uses_rendered_rows_and_modal_menus() {
-        use ratatui::{backend::TestBackend, Terminal};
-        let mut app = App::new(Client {
-            profile: "default".into(),
-            region: None,
-            read_only: true,
-        });
-        for index in 0..50 {
-            app.resources.push(Resource {
-                id: format!("i-{index}"),
-                name: format!("web-{index}"),
-                state: "running".into(),
-                kind: "t3.micro".into(),
-                address: "—".into(),
-                raw: serde_json::json!({}),
-            });
-        }
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        let mouse = |kind, column, row| MouseEvent {
-            kind,
-            column,
-            row,
-            modifiers: KeyModifiers::NONE,
-        };
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let list = app.mouse.resources;
-        app.mouse(mouse(MouseEventKind::ScrollDown, list.x + 2, list.y + 3));
-        assert_eq!(app.selected, 3);
-        app.selected = 35;
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let offset = app.table.offset();
-        app.mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            list.x + 2,
-            list.y + 2,
-        ));
-        assert_eq!(
-            app.selected, offset,
-            "Clicks must include table scroll offset"
-        );
-        app.execute(Action::Columns);
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let (area, _) = app
-            .mouse
-            .hits
-            .iter()
-            .find(|(_, target)| matches!(target, Click::Column(1)))
-            .unwrap();
-        app.mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            area.x,
-            area.y,
-        ));
-        assert!(!app.columns[1]);
-        assert!(app.overlay.is_some());
-        app.overlay = Some(Overlay::Palette {
-            query: "columns".into(),
-            selected: 0,
-        });
-        terminal.draw(|f| draw(f, &mut app)).unwrap();
-        let (area, _) = app.mouse.hits[0].clone();
-        app.mouse(mouse(
-            MouseEventKind::Down(MouseButton::Left),
-            area.x,
-            area.y,
-        ));
-        assert!(matches!(app.overlay, Some(Overlay::Columns { .. })));
-    }
+
     #[test]
     fn embedded_session_routes_keys_and_can_return_to_resources() {
         use ratatui::{backend::TestBackend, Terminal};

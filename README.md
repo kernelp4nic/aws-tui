@@ -138,23 +138,12 @@ Requires the local `session-manager-plugin`, a running SSM-managed instance with
 SSM Agent and appropriate instance permissions/connectivity, and caller IAM
 permissions for Session Manager. AWS CLI reports connection and permission errors.
 
-## Mouse
-
-Mouse capture is enabled while the TUI is running and released on exit.
-Click a service or resource row to select it. Click **Commands** or **Columns**
-in the header to open menus; click menu entries to activate them or toggle a
-column. The wheel moves through the resource list, detail fields or the open
-menu under the pointer. In SSM, the wheel scrolls local terminal history;
-click the **Instances** label or another session tab to switch views.
-Remote application mouse reporting and drag selection are not implemented.
-
 ## Instance actions menu
 
 Details remain visible by default while selecting resources, including in narrow
 terminals. Press **Enter** on an EC2 instance for a contextual menu with embedded
 SSM, SSM in an external Terminal window, EC2 console logs, details visibility,
-raw JSON, refresh, and EC2 start/stop/reboot actions. The same menu supports mouse
-clicks and wheel navigation. Actions remain tied to the selected instance ID
+raw JSON, refresh, and EC2 start/stop/reboot actions. Navigate the menu with arrow keys and Enter. Actions remain tied to the selected instance ID
 if resources refresh while the menu is open.
 
 SSM and instance mutations require actions mode. Console output is read-only and
@@ -167,12 +156,12 @@ region. macOS may request permission to control Terminal. That session lives
 outside the TUI: use `exit` in its window to end it; quitting the TUI or changing
 its mode does not close external sessions.
 
-### Select and copy text
+## Text selection and scrolling
 
-Press **F2** to switch to native terminal text selection. Drag over the text and
-use your terminal's copy shortcut (Cmd+C on macOS), then press **F2** again to
-return to mouse navigation. A yellow footer indicates selection mode. The screen
-stays still and keys are not forwarded to SSM while selecting; remote processes
-continue running. This also works from the command palette as **Toggle text
-selection / mouse navigation**. Some terminals additionally allow Shift+drag to
-bypass mouse capture without switching modes.
+The TUI does not capture the mouse. Select text by dragging normally and use
+your terminal's copy shortcut (Cmd+C on macOS). There is no F2 selection mode.
+
+Use j/k or arrows in resource lists and menus, PgUp/PgDn in details and console
+logs, and Shift+PgUp/PgDn for embedded SSM history. Native wheel behavior is
+controlled by the host terminal; it is not intercepted by the TUI. Clicks do not
+activate menus or change the selected instance.

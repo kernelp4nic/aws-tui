@@ -1,6 +1,9 @@
 use std::{
     io::{Read, Write},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     thread,
 };
 
@@ -14,6 +17,7 @@ const SCROLLBACK: usize = 5000;
 /// A child process on a pseudo-terminal whose output feeds a vt100 screen.
 pub struct PtySession {
     pub parser: Arc<Mutex<vt100::Parser>>,
+    pub revision: Arc<AtomicU64>,
     pub exited: bool,
     pub exit_ok: Option<bool>,
     master: Box<dyn MasterPty + Send>,
@@ -46,6 +50,8 @@ impl PtySession {
         drop(pair.slave);
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
 
+        let revision = Arc::new(AtomicU64::new(0));
+        let output_revision = Arc::clone(&revision);
         let shared = Arc::clone(&parser);
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
@@ -54,11 +60,13 @@ impl PtySession {
                     break;
                 }
                 shared.lock().unwrap().process(&buf[..n]);
+                output_revision.fetch_add(1, Ordering::Release);
             }
         });
 
         Ok(Self {
             parser,
+            revision,
             exited: false,
             exit_ok: None,
             master: pair.master,

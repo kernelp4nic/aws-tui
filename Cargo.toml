@@ -1,6 +1,6 @@
 [package]
 name = "aws-tui"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Keyboard-driven AWS explorer backed by AWS CLI"
 repository = "https://github.com/kernelp4nic/aws-tui"
